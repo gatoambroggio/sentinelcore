@@ -194,8 +194,11 @@ def send_event(camera_id, event_type, confidence, snapshot_path, bbox=None, face
         print(f"[AI] Error sending event: {e}", flush=True)
 
 
-def process_camera(camera):
-    """Process a single camera stream for detection + recognition."""
+def process_camera(camera, stop_event):
+    """Process a single camera stream for detection + recognition.
+
+    Exits cleanly when stop_event is set (camera removed, edited, or URL changed).
+    """
     camera_id = camera["id"]
     name = camera.get("name", camera_id)
     rtsp_url = camera.get("rtspUrl", "")
@@ -212,13 +215,15 @@ def process_camera(camera):
     last_detection = 0
     retries = 0
 
-    while cap.isOpened():
+    while cap.isOpened() and not stop_event.is_set():
         ret, frame = cap.read()
         if not ret:
             retries += 1
             if retries > 10:
                 print(f"[AI] {name}: stream desconectado, reintentando...", flush=True)
                 time.sleep(5)
+                if stop_event.is_set():
+                    break
                 cap.release()
                 cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
                 retries = 0
@@ -309,39 +314,58 @@ def process_camera(camera):
 
 
 # ── Main supervisor thread ──────────────────────────────────
-def supervisor():
-    """Periodically sync cameras and manage processing threads."""
-    active_threads = {}  # camera_id -> {thread, stop}
+active_threads_global = {}  # camera_id -> {thread, stop, rtsp_url, name}
 
+
+def supervisor():
+    """Periodically sync cameras and manage processing threads.
+
+    Detects:
+    - New cameras → starts a processing thread.
+    - Removed cameras → signals stop and cleans up.
+    - Changed RTSP URL → stops the old thread and starts a new one.
+    """
     while True:
         cameras = fetch_cameras()
-        current_ids = {c["id"] for c in cameras}
+        current = {c["id"]: c for c in cameras}
 
-        # Stop removed cameras
-        for cid in list(active_threads.keys()):
-            if cid not in current_ids:
-                t = active_threads[cid]["thread"]
-                # Can't kill threads in Python easily; let them finish naturally
-                del active_threads[cid]
-                print(f"[AI] Deteniendo cámara {cid}", flush=True)
+        # Stop removed or changed cameras
+        for cid in list(active_threads_global.keys()):
+            info = active_threads_global[cid]
+            if cid not in current:
+                info["stop"].set()
+                del active_threads_global[cid]
+                print(f"[AI] Deteniendo cámara {cid} (eliminada)", flush=True)
+            elif current[cid].get("rtspUrl") != info["rtsp_url"]:
+                info["stop"].set()
+                del active_threads_global[cid]
+                print(f"[AI] Reiniciando cámara {cid} (URL cambiada)", flush=True)
 
         # Start new cameras
-        for cam in cameras:
-            cid = cam["id"]
-            if cid not in active_threads:
-                t = threading.Thread(target=process_camera, args=(cam,), daemon=True)
-                active_threads[cid] = {"thread": t}
+        for cid, cam in current.items():
+            if cid not in active_threads_global:
+                stop_event = threading.Event()
+                t = threading.Thread(target=process_camera, args=(cam, stop_event), daemon=True)
+                active_threads_global[cid] = {
+                    "thread": t,
+                    "stop": stop_event,
+                    "rtsp_url": cam.get("rtspUrl", ""),
+                    "name": cam.get("name", cid),
+                }
                 t.start()
+                print(f"[AI] Iniciando cámara {cam.get('name', cid)}", flush=True)
 
         time.sleep(15)  # sync interval
 
 
 @app.route("/cameras/status")
 def cameras_status():
-    return jsonify({"processing": list(active_threads_global.keys()) if 'active_threads_global' in globals() else []})
-
-
-active_threads_global = {}
+    return jsonify({
+        "processing": [
+            {"id": cid, "name": info["name"]}
+            for cid, info in active_threads_global.items()
+        ]
+    })
 
 
 # ── Entry point ──────────────────────────────────────────────
