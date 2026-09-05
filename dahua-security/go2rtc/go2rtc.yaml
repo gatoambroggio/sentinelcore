@@ -1,0 +1,11 @@
+# go2rtc configuration
+# Streams are added dynamically by the backend API
+api:
+  listen: ":8083"
+
+webrtc:
+  listen: ":8554"
+
+log:
+  level: info
+  exec: false

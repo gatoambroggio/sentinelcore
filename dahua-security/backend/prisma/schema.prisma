@@ -1,0 +1,92 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  fullName  String?  @map("full_name")
+  role      Role     @default(OPERATOR)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@map("users")
+}
+
+enum Role {
+  ADMIN
+  OPERATOR
+}
+
+model Camera {
+  id        String   @id @default(cuid())
+  name      String
+  ip        String
+  port      Int      @default(554)
+  username  String
+  password  String
+  channel   Int      @default(1)
+  subtype   String   @default("main")
+  rtspUrl   String   @map("rtsp_url")
+  active    Boolean  @default(true)
+  zoneId    String?  @map("zone_id")
+  zone      Zone?    @relation(fields: [zoneId], references: [id])
+  events    Event[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@map("cameras")
+}
+
+model Zone {
+  id        String   @id @default(cuid())
+  name      String
+  polygon   Json
+  active    Boolean  @default(true)
+  cameras   Camera[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@map("zones")
+}
+
+model Face {
+  id        String   @id @default(cuid())
+  name      String
+  embedding Json
+  photoUrl  String?  @map("photo_url")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@map("faces")
+}
+
+model Event {
+  id           String    @id @default(cuid())
+  type         EventType
+  cameraId     String    @map("camera_id")
+  camera       Camera    @relation(fields: [cameraId], references: [id])
+  faceId       String?   @map("face_id")
+  faceName     String?   @map("face_name")
+  confidence   Float     @default(0)
+  snapshotPath String?   @map("snapshot_path")
+  bbox         Json?
+  message      String?
+  createdAt    DateTime  @default(now()) @map("created_at")
+  @@index([createdAt])
+  @@index([cameraId])
+  @@index([type])
+  @@map("events")
+}
+
+enum EventType {
+  PERSON
+  VEHICLE
+  INTRUSION
+  FACE_ID
+  UNKNOWN_FACE
+}
