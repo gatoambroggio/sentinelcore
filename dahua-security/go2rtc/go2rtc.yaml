@@ -1,10 +1,14 @@
 # go2rtc configuration
-# Streams are added dynamically by the backend API
+# Streams are added dynamically by the backend API.
+# The 'candidates' IP is replaced by install.sh with the server's LAN IP
+# so browsers can establish the WebRTC connection.
 api:
   listen: ":8083"
 
 webrtc:
   listen: ":8554"
+  candidates:
+    - "REPLACE_WITH_SERVER_IP:8554"
 
 log:
   level: info
