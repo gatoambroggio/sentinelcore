@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Plus, Trash2, Camera, Video, Power, Loader2 } from 'lucide-react';
 import api from '../api/client.js';
 import { useAuth } from '../context/AuthContext.jsx';
+import WebRTCStream from '../components/WebRTCStream.jsx';
 
 export default function Cameras() {
   const { user } = useAuth();
@@ -76,12 +77,7 @@ export default function Cameras() {
           <div key={cam.id} className="bg-card rounded-xl border border-slate-700/30 overflow-hidden">
             <div className="aspect-video bg-panel flex items-center justify-center relative">
               {cam.active ? (
-                <iframe
-                  src={`/stream/stream.html?src=${cam.id}&mode=webrtc`}
-                  className="w-full h-full"
-                  allow="autoplay; fullscreen"
-                  title={cam.name}
-                />
+                <WebRTCStream cameraId={cam.id} />
               ) : (
                 <Video className="w-10 h-10 text-slate-600" />
               )}
