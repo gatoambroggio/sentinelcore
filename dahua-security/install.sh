@@ -14,6 +14,7 @@ JWT_SECRET=$(openssl rand -hex 32)
 AI_PORT=5000
 API_PORT=4000
 GO2RTC_PORT=8083
+WEBRTC_PORT=8554
 ADMIN_EMAIL="admin@dahua.local"
 ADMIN_PASS="DahuaAdmin2026"
 SERVER_IP=$(hostname -I | awk '{print $1}')
@@ -43,7 +44,7 @@ apt-get install -y -qq \
   postgresql postgresql-contrib \
   python3 python3-venv python3-dev \
   libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
-  ca-certificates gnupg > /dev/null 2>&1
+  ca-certificates gnupg openssl > /dev/null 2>&1
 
 # ── 2. Node.js 20 ───────────────────────────────────────────
 if ! command -v node &>/dev/null || [[ "$(node -v | cut -d. -f1 | tr -d v)" -lt 20 ]]; then
@@ -149,34 +150,75 @@ if [[ ! -f "${GO2RTC_DIR}/go2rtc" ]]; then
     -o "${GO2RTC_DIR}/go2rtc" > /dev/null 2>&1
   chmod +x "${GO2RTC_DIR}/go2rtc"
 fi
-log "go2rtc instalado"
 
-# ── 11. Nginx ────────────────────────────────────────────────
-log "Configurando Nginx..."
+# Generate go2rtc.yaml with the server's LAN IP as WebRTC candidate
+cat > "${GO2RTC_DIR}/go2rtc.yaml" <<EOF_GO2RTC
+api:
+  listen: ":${GO2RTC_PORT}"
+webrtc:
+  listen: ":${WEBRTC_PORT}"
+  candidates:
+    - "${SERVER_IP}:${WEBRTC_PORT}"
+log:
+  level: info
+  exec: false
+EOF_GO2RTC
+log "go2rtc instalado (candidato WebRTC: ${SERVER_IP}:${WEBRTC_PORT})"
+
+# ── 11. SSL Certificate ─────────────────────────────────────
+log "Generando certificado SSL autofirmado..."
+SSL_DIR="/etc/nginx/ssl"
+mkdir -p "${SSL_DIR}"
+if [[ ! -f "${SSL_DIR}/dahua-selfsigned.crt" ]]; then
+  openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+    -keyout "${SSL_DIR}/dahua-selfsigned.key" \
+    -out "${SSL_DIR}/dahua-selfsigned.crt" \
+    -subj "/CN=${SERVER_IP}" > /dev/null 2>&1
+  log "Certificado SSL generado (válido 10 años)"
+else
+  warn "Certificado SSL ya existía"
+fi
+
+# ── 12. Nginx ────────────────────────────────────────────────
+log "Configurando Nginx (HTTP + HTTPS)..."
 cat > /etc/nginx/sites-available/dahua-security <<'EOF_NGINX'
 server {
     listen 80;
+    listen 443 ssl;
     server_name _;
+
+    ssl_certificate     /etc/nginx/ssl/dahua-selfsigned.crt;
+    ssl_certificate_key /etc/nginx/ssl/dahua-selfsigned.key;
+
     client_max_body_size 50M;
     root /opt/dahua-enterprise/frontend/dist;
     index index.html;
 
+    # Frontend SPA
     location / {
         try_files $uri $uri/ /index.html;
     }
+
+    # Backend API
     location /api/ {
         proxy_pass http://localhost:4000/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
+
+    # go2rtc streaming (WebRTC signaling + web UI)
     location /stream/ {
         proxy_pass http://localhost:8083/;
         proxy_set_header Host $host;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
     }
+
+    # AI detection snapshots
     location /snapshots/ {
         alias /opt/dahua-enterprise/snapshots/;
     }
@@ -185,9 +227,19 @@ EOF_NGINX
 ln -sf /etc/nginx/sites-available/dahua-security /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t > /dev/null 2>&1 && systemctl reload nginx
-log "Nginx configurado"
+log "Nginx configurado (HTTP puerto 80 + HTTPS puerto 443)"
 
-# ── 12. PM2 ──────────────────────────────────────────────────
+# ── 13. Firewall ─────────────────────────────────────────────
+if command -v ufw &>/dev/null; then
+  log "Configurando firewall (ufw)..."
+  ufw allow 80/tcp 2>/dev/null || true
+  ufw allow 443/tcp 2>/dev/null || true
+  ufw allow ${WEBRTC_PORT}/tcp 2>/dev/null || true
+  ufw allow ${WEBRTC_PORT}/udp 2>/dev/null || true
+  log "Firewall: puertos 80, 443, ${WEBRTC_PORT} abiertos"
+fi
+
+# ── 14. PM2 ──────────────────────────────────────────────────
 log "Registrando servicios en PM2..."
 cd "${INSTALL_DIR}"
 pm2 delete dahua-backend 2>/dev/null || true
@@ -202,7 +254,7 @@ pm2 save > /dev/null 2>&1
 pm2 startup systemd -u root --hp /root > /dev/null 2>&1 || true
 log "Servicios arrancados"
 
-# ── 13. Permissions ─────────────────────────────────────────
+# ── 15. Permissions ─────────────────────────────────────────
 chown -R www-data:www-data "${INSTALL_DIR}/snapshots" 2>/dev/null || true
 chmod -R 755 "${INSTALL_DIR}/snapshots" 2>/dev/null || true
 
@@ -213,17 +265,26 @@ echo -e "${GREEN}  ✓ INSTALACIÓN COMPLETADA${NC}"
 echo -e "${CYAN}============================================================${NC}"
 echo ""
 echo -e "  ${CYAN}Panel web:${NC}     http://${SERVER_IP}"
+echo -e "  ${CYAN}Panel web SSL:${NC} https://${SERVER_IP}"
 echo -e "  ${CYAN}Usuario:${NC}       ${ADMIN_EMAIL}"
 echo -e "  ${CYAN}Contraseña:${NC}    ${ADMIN_PASS}"
 echo ""
 echo -e "  ${YELLOW}Servicios PM2:${NC}"
 echo -e "    • dahua-backend  — API Express (puerto ${API_PORT})"
 echo -e "    • dahua-ai        — Motor IA YOLOv8+InsightFace (puerto ${AI_PORT})"
-echo -e "    • go2rtc          — Streaming WebRTC (puerto ${GO2RTC_PORT})"
+echo -e "    • go2rtc          — Streaming WebRTC (puerto ${GO2RTC_PORT} / ${WEBRTC_PORT})"
+echo ""
+echo -e "  ${YELLOW}Puertos de firewall:${NC}"
+echo -e "    • 80 (HTTP) / 443 (HTTPS) — panel web"
+echo -e "    • ${WEBRTC_PORT} TCP+UDP — streaming WebRTC de cámaras"
 echo ""
 echo -e "  ${YELLOW}Comandos:${NC}"
 echo -e "    pm2 status              — estado de servicios"
 echo -e "    pm2 logs dahua-backend  — logs del backend"
 echo -e "    pm2 logs dahua-ai       — logs de IA"
+echo ""
+echo -e "  ${YELLOW}Nota:${NC} Al acceder por HTTPS el navegador mostrará"
+echo -e "  una advertencia de certificado autofirmado (es normal en LAN)."
+echo -e "  Click en 'Opciones avanzadas' → 'Continuar'."
 echo ""
 echo -e "${CYAN}============================================================${NC}"
